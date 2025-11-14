@@ -76,61 +76,20 @@ class OidcProxy(ProxyBase):
     - STARTTLS (explicit TLS upgrade on port 389)
     - mTLS (mutual TLS with client certificate verification)
     """
-    # STARTTLS OID as defined in RFC 4511
-    STARTTLS_OID = '1.3.6.1.4.1.1466.20037'
     
     def __init__(self, config, ssl_context_factory=None):
         ProxyBase.__init__(self)  # Initialize parent class
         self.config = config
         self.ssl_context_factory = ssl_context_factory
-        self.tls_started = False
+        self.startTLS_initiated = False  # Flag expected by ldaptor framework
 
 
     def handleBeforeForwardRequest(self, request, controls, reply):
         """
         Handle incoming LDAP requests and translate to OIDC.
-        Supports STARTTLS extended operation for TLS upgrade.
+        Note: STARTTLS is handled by handle_LDAPExtendedRequest and handleStartTLSRequest.
         """
         print(repr(request))
-        
-        # Handle STARTTLS Extended Operation
-        if isinstance(request, pureldap.LDAPExtendedRequest):
-            if request.requestName == self.STARTTLS_OID:
-                if self.tls_started:
-                    # Already in TLS mode
-                    msg = pureldap.LDAPExtendedResponse(
-                        resultCode=ldaperrors.LDAPOperationsError.resultCode,
-                        responseName=self.STARTTLS_OID,
-                        errorMessage=b'TLS already established'
-                    )
-                    reply(msg)
-                elif not self.ssl_context_factory:
-                    # TLS not configured
-                    msg = pureldap.LDAPExtendedResponse(
-                        resultCode=ldaperrors.LDAPUnavailable.resultCode,
-                        responseName=self.STARTTLS_OID,
-                        errorMessage=b'STARTTLS not available'
-                    )
-                    reply(msg)
-                else:
-                    # Start TLS on the connection
-                    msg = pureldap.LDAPExtendedResponse(
-                        resultCode=ldaperrors.Success.resultCode,
-                        responseName=self.STARTTLS_OID
-                    )
-                    reply(msg)
-                    # Upgrade connection to TLS
-                    self.transport.startTLS(self.ssl_context_factory)
-                    self.tls_started = True
-                    print("STARTTLS negotiation successful, connection upgraded to TLS")
-                return None
-            else:
-                # Other extended operations - return success dummy response
-                msg = pureldap.LDAPExtendedResponse(
-                    resultCode=ldaperrors.Success.resultCode
-                )
-                reply(msg)
-                return None
         
         if isinstance(request, pureldap.LDAPBindRequest):
             # Get OIDC token throught password grant
@@ -176,6 +135,72 @@ class OidcProxy(ProxyBase):
                 resultCode=ldaperrors.Success.resultCode
             )
             reply(msg)
+        return None
+
+    def handleStartTLSRequest(self, request, controls, reply):
+        """
+        Override ldaptor's handleStartTLSRequest to add logging.
+        Upgrade the connection to TLS using factory.options.
+        """
+        print("handleStartTLSRequest called")
+        
+        if self.startTLS_initiated:
+            # Already in TLS mode
+            msg = pureldap.LDAPStartTLSResponse(
+                resultCode=ldaperrors.LDAPOperationsError.resultCode,
+                errorMessage=b'TLS already established'
+            )
+            print("TLS already established. Responding with operationsError")
+        elif not hasattr(self.factory, 'options') or self.factory.options is None:
+            # TLS not configured
+            msg = pureldap.LDAPStartTLSResponse(
+                resultCode=ldaperrors.LDAPUnavailable.resultCode,
+                errorMessage=b'STARTTLS not available'
+            )
+            print("STARTTLS not available. Responding with unavailable")
+        else:
+            # Start TLS on the connection
+            msg = pureldap.LDAPStartTLSResponse(
+                resultCode=ldaperrors.Success.resultCode
+            )
+            print("Sending STARTTLS success response")
+            reply(msg)
+            # Upgrade connection to TLS after sending response
+            print("Upgrading transport to TLS...")
+            self.transport.startTLS(self.factory.options)
+            self.startTLS_initiated = True
+            print("STARTTLS negotiation successful, connection upgraded to TLS")
+            # Set msg to None so parent doesn't send it again
+            msg = None
+        
+        # Reply if we haven't already
+        if msg is not None:
+            reply(msg)
+        
+        return None
+
+    def handle_LDAPExtendedRequest(self, request, controls, reply):
+        """
+        Handle LDAP Extended Request - intercepts STARTTLS before parent class.
+        Uses defer.maybeDeferred like the parent class.
+        """
+        print(f"handle_LDAPExtendedRequest called: {request.requestName if hasattr(request, 'requestName') else 'unknown'}")
+        
+        # Check if this is a STARTTLS request
+        if hasattr(request, 'requestName') and request.requestName == pureldap.LDAPStartTLSRequest.oid:
+            # Call handleStartTLSRequest with defer like parent does
+            from twisted.internet import defer
+            d = defer.maybeDeferred(
+                self.handleStartTLSRequest, request, controls, reply
+            )
+            d.addErrback(lambda err: print(f"STARTTLS error: {err}"))
+            return d
+        
+        # For other extended operations, return success dummy response
+        msg = pureldap.LDAPExtendedResponse(
+            resultCode=ldaperrors.Success.resultCode
+        )
+        reply(msg)
         return None
 
     ## TODO: This is a Workaround, implement a cleaner proxy class from class ServerBase
@@ -265,6 +290,8 @@ if __name__ == '__main__':
     ssl_context_factory = create_ssl_context_factory(config)
     
     factory = protocol.ServerFactory()
+    # Set factory.options for STARTTLS support
+    factory.options = ssl_context_factory
     proxiedEndpointStr = 'NoEndpointneeded'
     use_tls = False
     clientConnector = partial(
