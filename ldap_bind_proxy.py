@@ -117,15 +117,19 @@ class OidcProxy(ldapserver.BaseLDAPServer):
             print(username.decode('utf-8') + " " + str(oidc_response.status_code))
             
             if oidc_response.status_code == requests.codes['ok']:
-                # LDAP Bind success
-                msg= pureldap.LDAPBindResponse(
-                        resultCode=ldaperrors.Success.resultCode
-                    )
+                # LDAP Bind success - include matchedDN for RFC compliance
+                msg = pureldap.LDAPBindResponse(
+                    resultCode=ldaperrors.Success.resultCode,
+                    matchedDN=request.dn,  # Echo back the DN that was bound
+                    errorMessage=b'',      # Empty on success per RFC 4511
+                )
             else:
-                # Invalid credentials (see keycloak logs)
-                msg= pureldap.LDAPBindResponse(
-                        resultCode=ldaperrors.LDAPInvalidCredentials.resultCode
-                    )
+                # Invalid credentials
+                msg = pureldap.LDAPBindResponse(
+                    resultCode=ldaperrors.LDAPInvalidCredentials.resultCode,
+                    matchedDN=b'',         # Empty on error
+                    errorMessage=b'Invalid credentials',
+                )
             reply(msg)
         if isinstance(request, pureldap.LDAPSearchRequest):
             # TODO: If needed, for confidential clients with service account only, search within keycloak API and reply with search result, dummy response for now.
