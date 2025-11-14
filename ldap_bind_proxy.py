@@ -19,6 +19,7 @@ from ldaptor.protocols.ldap.ldapconnector import connectToLDAPEndpoint
 from ldaptor.protocols.ldap.proxybase import ProxyBase
 from ldaptor.protocols.ldap import ldapserver, ldaperrors
 from twisted.internet import protocol, reactor
+from twisted.internet.ssl import DefaultOpenSSLContextFactory
 from twisted.python import log
 from functools import partial
 import sys
@@ -27,10 +28,39 @@ import os
 
 from mock import Mock
 
+class Configuration():
+    """
+    Configuration class to hold environment variable values.
+    Reads configuration from environment variables on initialization.
+
+    1. LDAP_PROXY_TLS_CERTFILE : Path to TLS certificate file for LDAPS (default None)
+    2. LDAP_PROXY_TLS_KEYFILE : Path to TLS key file for LDAPS (default None)
+    3. LDAP_PROXY_TLS_PORT : Port number for LDAPS listener (default 636)
+    4. LDAP_PROXY_PORT : Port number for plain LDAP listener (default 389)
+
+    5. LDAP_PROXY_TOKEN_URL : OIDC Token endpoint URL
+    6. LDAP_PROXY_CLIENT_ID : OIDC Client ID
+    7. LDAP_PROXY_CLIENT_SECRET : OIDC Client Secret
+    """
+    def __init__(self):
+        self.tls_certfile = os.environ.get('LDAP_PROXY_TLS_CERTFILE')
+        self.tls_keyfile = os.environ.get('LDAP_PROXY_TLS_KEYFILE')
+        self.tls_port = int(os.environ.get('LDAP_PROXY_TLS_PORT', '636'))
+        self.plain_port = int(os.environ.get('LDAP_PROXY_PORT', '389'))
+        self.enable_plain = os.environ.get('LDAP_PROXY_ENABLE_PLAIN', 'false').lower() in ('1', 'true', 'yes')
+
+        self.url = os.environ.get("LDAP_PROXY_TOKEN_URL")
+        self.client_id = os.environ.get("LDAP_PROXY_CLIENT_ID")
+        self.client_secret = os.environ.get("LDAP_PROXY_CLIENT_SECRET")
+
+
 class OidcProxy(ProxyBase):
     """
     A simple example of using `ProxyBase` to log requests and responses.
     """
+    def __init__(self, config):
+        self.config = config
+
 
     def handleBeforeForwardRequest(self, request, controls, reply):
         """
@@ -45,9 +75,9 @@ class OidcProxy(ProxyBase):
 
             ## TODO : Nice to have Add support for OTP within password
 
-            url = os.environ.get("LDAP_PROXY_TOKEN_URL")
-            client_id = os.environ.get("LDAP_PROXY_CLIENT_ID")
-            client_secret = os.environ.get("LDAP_PROXY_CLIENT_SECRET")
+            url = self.config.url
+            client_id = self.config.client_id
+            client_secret = self.config.client_secret
 
             payload = 'client_id={client_id}&client_secret={client_secret}&grant_type=password&username={username}&password={password}'.format(client_id=client_id, client_secret=client_secret, username=username.decode('utf-8'), password=password.decode('utf-8'))
             headers = {
@@ -100,6 +130,9 @@ if __name__ == '__main__':
     """
     Demonstration LDAP OIDC proxy; listens on localhost:389 and translate to OIDC protocol
     """
+
+    config = Configuration()
+
     log.startLogging(sys.stderr)
     factory = protocol.ServerFactory()
     proxiedEndpointStr = 'NoEndpointneeded'
@@ -111,11 +144,33 @@ if __name__ == '__main__':
         LDAPClient)
 
     def buildProtocol():
-        proto = OidcProxy()
+        proto = OidcProxy(config)
         proto.clientConnector = clientConnector
         proto.use_tls = use_tls
         return proto
 
     factory.protocol = buildProtocol
-    reactor.listenTCP(389, factory)
+
+    # Ports and TLS files are configurable through environment variables.
+    # If TLS cert and key are provided, start an LDAPS listener (implicit TLS) on LDAP_PROXY_TLS_PORT (default 636).
+    # Otherwise fall back to plain LDAP on LDAP_PROXY_PORT (default 389) for backwards compatibility.
+    if config.tls_certfile and config.tls_keyfile:
+        # Minimal, secure server-side TLS (LDAPS). For mutual TLS / CA verification more setup is required.
+        try:
+            contextFactory = DefaultOpenSSLContextFactory(config.tls_keyfile, config.tls_certfile)
+            reactor.listenSSL(config.tls_port, factory, contextFactory)
+            print('LDAPS listening on port {}'.format(config.tls_port))
+
+            # Optionally also open plain port if explicitly requested
+            if config.enable_plain :
+                reactor.listenTCP(config.plain_port, factory)
+                print('Plain LDAP also listening on port {}'.format(config.plain_port))
+        except Exception as e:
+            print('Failed to start LDAPS: {}'.format(e))
+            print('Exiting. please check your TLS certificate and key file paths and {} port availability.'.format(config.tls_port))
+            sys.exit(1)
+    else:
+        reactor.listenTCP(config.plain_port, factory)
+        print('Plain LDAP listening on port {}'.format(config.plain_port))
+
     reactor.run()
