@@ -14,21 +14,16 @@
 # limitations under the License.
 
 from ldaptor.protocols import pureldap
-from ldaptor.protocols.ldap.ldapclient import LDAPClient
-from ldaptor.protocols.ldap.ldapconnector import connectToLDAPEndpoint
-from ldaptor.protocols.ldap.proxybase import ProxyBase
 from ldaptor.protocols.ldap import ldapserver, ldaperrors
-from twisted.internet import protocol, reactor, ssl as twisted_ssl
+from twisted.internet import protocol, reactor, ssl as twisted_ssl, defer
 from twisted.internet.ssl import CertificateOptions, Certificate, PrivateCertificate
 from twisted.python import log
-from functools import partial
 import sys
 import requests
 import os
 import ssl
 from OpenSSL import SSL, crypto
 
-from mock import Mock
 
 class Configuration():
     """
@@ -67,9 +62,13 @@ class Configuration():
         self.client_secret = os.environ.get("LDAP_PROXY_CLIENT_SECRET")
 
 
-class OidcProxy(ProxyBase):
+class OidcProxy(ldapserver.BaseLDAPServer):
     """
     LDAP to OIDC authentication proxy with TLS support.
+    
+    This is a terminating proxy that translates LDAP bind requests to OIDC
+    password grant requests. Unlike ProxyBase, we don't forward to a backend
+    LDAP server - we handle all requests directly.
     
     Supports:
     - LDAPS (implicit TLS on port 636)
@@ -78,16 +77,20 @@ class OidcProxy(ProxyBase):
     """
     
     def __init__(self, config, ssl_context_factory=None):
-        ProxyBase.__init__(self)  # Initialize parent class
+        ldapserver.BaseLDAPServer.__init__(self)
         self.config = config
         self.ssl_context_factory = ssl_context_factory
-        self.startTLS_initiated = False  # Flag expected by ldaptor framework
+        self.startTLS_initiated = False
 
-
-    def handleBeforeForwardRequest(self, request, controls, reply):
+    def handleUnknown(self, request, controls, reply):
         """
         Handle incoming LDAP requests and translate to OIDC.
-        Note: STARTTLS is handled by handle_LDAPExtendedRequest and handleStartTLSRequest.
+        
+        This is the default handler for BaseLDAPServer when no specific
+        handle_XXX method exists. We override it to handle bind, search,
+        and unbind requests directly without forwarding to a backend.
+        
+        Note: STARTTLS is handled by handle_LDAPExtendedRequest.
         """
         print(repr(request))
         
@@ -203,14 +206,6 @@ class OidcProxy(ProxyBase):
         reply(msg)
         return None
 
-    ## TODO: This is a Workaround, implement a cleaner proxy class from class ServerBase
-    def connectionMade(self):
-        """ Overridden method to prevent proxy from trying to connect non-existing backend server.
-        Mocking client class to drop every operation made to it"""
-        print("connectionMade called")
-        self.client = Mock()
-        ldapserver.BaseLDAPServer.connectionMade(self)
-
 
 def create_ssl_context_factory(config):
     """
@@ -292,19 +287,10 @@ if __name__ == '__main__':
     factory = protocol.ServerFactory()
     # Set factory.options for STARTTLS support
     factory.options = ssl_context_factory
-    proxiedEndpointStr = 'NoEndpointneeded'
-    use_tls = False
-    clientConnector = partial(
-        connectToLDAPEndpoint,
-        reactor,
-        proxiedEndpointStr,
-        LDAPClient)
-
+    
     def buildProtocol():
-        proto = OidcProxy(config, ssl_context_factory)
-        proto.clientConnector = clientConnector
-        proto.use_tls = use_tls
-        return proto
+        """Build protocol instance for each client connection."""
+        return OidcProxy(config, ssl_context_factory)
 
     factory.protocol = buildProtocol
 
