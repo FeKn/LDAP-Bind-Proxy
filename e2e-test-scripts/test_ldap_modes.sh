@@ -45,7 +45,7 @@ echo ""
 echo -e "${YELLOW}Test 1: Plain LDAP (no encryption)${NC}"
 echo "Command: ldapwhoami -h $HOST -p $PLAIN_PORT -D \"$BINDDN\" -w $BINDPW"
 if $VERBOSE; then
-    if ldapwhoami -h "$HOST" -p "$PLAIN_PORT" -D "$BINDDN" -w "$BINDPW"; then
+    if ldapwhoami -vvv -h "$HOST" -p "$PLAIN_PORT" -D "$BINDDN" -w "$BINDPW"; then
         echo -e "${GREEN}✓ Plain LDAP test PASSED${NC}"
     else
         echo -e "${RED}✗ Plain LDAP test FAILED${NC}"
@@ -63,7 +63,7 @@ echo ""
 echo -e "${YELLOW}Test 2: STARTTLS (explicit TLS upgrade)${NC}"
 echo "Command: ldapwhoami -h $HOST -p $PLAIN_PORT -D \"$BINDDN\" -w $BINDPW -ZZ"
 if $VERBOSE; then
-    if ldapwhoami -h "$HOST" -p "$PLAIN_PORT" -D "$BINDDN" -w "$BINDPW" -ZZ; then
+    if ldapwhoami -vvv -h "$HOST" -p "$PLAIN_PORT" -D "$BINDDN" -w "$BINDPW" -ZZ; then
         echo -e "${GREEN}✓ STARTTLS test PASSED${NC}"
     else
         echo -e "${RED}✗ STARTTLS test FAILED (use LDAPTLS_REQCERT=never if using self-signed certs)${NC}"
@@ -81,7 +81,7 @@ echo ""
 echo -e "${YELLOW}Test 3: LDAPS (implicit TLS on port $LDAPS_PORT)${NC}"
 echo "Command: ldapwhoami -h $HOST -p $LDAPS_PORT -D \"$BINDDN\" -w $BINDPW -H ldaps://$HOST:$LDAPS_PORT"
 if $VERBOSE; then
-    if ldapwhoami -H "ldaps://$HOST:$LDAPS_PORT" -D "$BINDDN" -w "$BINDPW"; then
+    if ldapwhoami -vvv -H "ldaps://$HOST:$LDAPS_PORT" -D "$BINDDN" -w "$BINDPW"; then
         echo -e "${GREEN}✓ LDAPS test PASSED${NC}"
     else
         echo -e "${RED}✗ LDAPS test FAILED (use LDAPTLS_REQCERT=never if using self-signed certs)${NC}"
@@ -107,7 +107,7 @@ export LDAPTLS_REQCERT=never
 echo -e "${YELLOW}Test 2 (retry): STARTTLS with cert verification disabled${NC}"
 echo "Command: LDAPTLS_REQCERT=never ldapwhoami -h $HOST -p $PLAIN_PORT -D \"$BINDDN\" -w $BINDPW -ZZ"
 if $VERBOSE; then
-    if ldapwhoami -h "$HOST" -p "$PLAIN_PORT" -D "$BINDDN" -w "$BINDPW" -ZZ; then
+    if ldapwhoami -vvv -h "$HOST" -p "$PLAIN_PORT" -D "$BINDDN" -w "$BINDPW" -ZZ; then
         echo -e "${GREEN}✓ STARTTLS test PASSED${NC}"
     else
         echo -e "${RED}✗ STARTTLS test FAILED${NC}"
@@ -125,7 +125,7 @@ echo ""
 echo -e "${YELLOW}Test 3 (retry): LDAPS with cert verification disabled${NC}"
 echo "Command: LDAPTLS_REQCERT=never ldapwhoami -H ldaps://$HOST:$LDAPS_PORT -D \"$BINDDN\" -w $BINDPW"
 if $VERBOSE; then
-    if ldapwhoami -H "ldaps://$HOST:$LDAPS_PORT" -D "$BINDDN" -w "$BINDPW"; then
+    if ldapwhoami -vvv -H "ldaps://$HOST:$LDAPS_PORT" -D "$BINDDN" -w "$BINDPW"; then
         echo -e "${GREEN}✓ LDAPS test PASSED${NC}"
     else
         echo -e "${RED}✗ LDAPS test FAILED${NC}"

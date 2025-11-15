@@ -5,7 +5,14 @@
 
 ## TL;DR
 
-How to spawn a simple bind LDAP proxy for keycloak OIDC password grant in a nutshell. Now with production-ready TLS/SSL support including LDAPS, STARTTLS, and mTLS.
+How to spawn a simple LDAP proxy for Keycloak OIDC integration. Supports LDAP bind authentication and search operations, with production-ready TLS/SSL support including LDAPS, STARTTLS, and mTLS.
+
+## ✨ Features
+
+- **LDAP Authentication** - Translates LDAP bind requests to OIDC password grants
+- **LDAP Search** - Returns user attributes from OIDC token claims
+- **TLS/SSL Support** - LDAPS, STARTTLS, and mTLS for secure connections
+- **Keycloak Integration** - Works with Keycloak LDAP federation for legacy applications
 
 ## 🔒 TLS/SSL Support (NEW)
 
@@ -67,11 +74,43 @@ It is also a way more simple component that can be spawned anywhere you need it 
 
 ## How LDAP Bind proxy works
 
-Ldap bind proxy will simply "translate" LDAPBind request it receives to password grant request. To do so, it needs its own dedicated confidential client that allows direct access grant.
+The LDAP Bind Proxy acts as a terminating LDAP server that translates LDAP operations to OIDC:
+
+**Authentication (LDAP Bind):**
+- Receives LDAP bind request with username/password
+- Translates to OIDC password grant request
+- Caches OIDC access token claims on successful authentication
+- Returns RFC 4511 compliant LDAP bind response
+
+**Directory Queries (LDAP Search):**
+- Receives LDAP search requests
+- Returns user attributes from cached OIDC token claims
+- Maps OIDC claims to standard LDAP attributes (uid, mail, cn, sn, etc.)
 
 ![Sequence diagram of LDAP Bind proxy](image-2.png)
 
-The user logs-in as he always does, the legacy app sends a LDAPBindRequest as it always does, then the LDAP Bind proxy translates it to a password grant and gives a LDAP Bind Response according to the keycloak's response.
+The user logs-in as usual, the legacy app sends LDAP requests as it always does, and the proxy translates them to OIDC operations, returning LDAP responses based on Keycloak's OIDC responses.
+
+### Supported LDAP Operations
+
+- **Bind** - Authentication via OIDC password grant
+- **Search** - User attribute queries from OIDC token claims  
+- **Unbind** - Session cleanup
+- **STARTTLS** - TLS upgrade for secure connections
+
+### OIDC Claim to LDAP Attribute Mapping
+
+| OIDC Claim | LDAP Attribute | Description |
+|------------|----------------|-------------|
+| preferred_username/sub | uid | User ID |
+| email | mail | Email address |
+| name | cn | Common name (full name) |
+| family_name | sn | Surname (last name) |
+| given_name | givenName | First name |
+| iat | createTimestamp | Account creation time |
+| iat | modifyTimestamp | Last modification time |
+| (generated) | entryUUID | Unique entry identifier |
+| (static) | objectClass | inetOrgPerson, organizationalPerson, person, top |
 
 To ensure login security, the client must be confidential and the LDAP bind proxy must be deployed on a safe network and VM to keep its client credentials secret.
 

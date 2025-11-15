@@ -22,6 +22,10 @@ import sys
 import requests
 import os
 import ssl
+import json
+import jwt
+import hashlib
+from datetime import datetime, timedelta
 from OpenSSL import SSL, crypto
 
 
@@ -74,13 +78,19 @@ class OidcProxy(ldapserver.BaseLDAPServer):
     - LDAPS (implicit TLS on port 636)
     - STARTTLS (explicit TLS upgrade on port 389)
     - mTLS (mutual TLS with client certificate verification)
+    - LDAP search with user data from OIDC token claims
     """
+    
+    # Class-level token cache (shared across all connections)
+    # Key: username, Value: {token_data, expires_at}
+    _token_cache = {}
     
     def __init__(self, config, ssl_context_factory=None):
         ldapserver.BaseLDAPServer.__init__(self)
         self.config = config
         self.ssl_context_factory = ssl_context_factory
         self.startTLS_initiated = False
+        self.bound_user = None  # Track currently bound user for this connection
 
     def handleUnknown(self, request, controls, reply):
         """
@@ -96,8 +106,12 @@ class OidcProxy(ldapserver.BaseLDAPServer):
         
         if isinstance(request, pureldap.LDAPBindRequest):
             # Get OIDC token throught password grant
-            ## Quick and dirty username from DN assuming it is CN
-            username = request.dn.split(b',')[0][3:]
+            # Extract username from DN (handle both cn=xxx and uid=xxx)
+            rdn = request.dn.split(b',')[0]  # Get first RDN (e.g., "cn=test" or "uid=test")
+            if b'=' in rdn:
+                username = rdn.split(b'=', 1)[1]  # Get value after first '='
+            else:
+                username = rdn  # Fallback if no '=' found
             password = request.auth
 
             ## TODO : Nice to have Add support for OTP within password
@@ -117,6 +131,26 @@ class OidcProxy(ldapserver.BaseLDAPServer):
             print(username.decode('utf-8') + " " + str(oidc_response.status_code))
             
             if oidc_response.status_code == requests.codes['ok']:
+                # Store token data for search operations
+                try:
+                    token_data = oidc_response.json()
+                    # Decode access token to get claims (without verification for caching)
+                    access_token = token_data.get('access_token')
+                    if access_token:
+                        # Decode without verification (we trust our own OIDC server)
+                        claims = jwt.decode(access_token, options={"verify_signature": False})
+                        # Cache token with expiry
+                        expires_in = token_data.get('expires_in', 300)  # Default 5 minutes
+                        self._token_cache[username.decode('utf-8')] = {
+                            'claims': claims,
+                            'token_data': token_data,
+                            'expires_at': datetime.now() + timedelta(seconds=expires_in)
+                        }
+                        # Track bound user for this connection
+                        self.bound_user = username.decode('utf-8')
+                except Exception as e:
+                    print(f"Warning: Could not cache token data: {e}")
+                
                 # LDAP Bind success - include matchedDN for RFC compliance
                 msg = pureldap.LDAPBindResponse(
                     resultCode=ldaperrors.Success.resultCode,
@@ -132,11 +166,7 @@ class OidcProxy(ldapserver.BaseLDAPServer):
                 )
             reply(msg)
         if isinstance(request, pureldap.LDAPSearchRequest):
-            # TODO: If needed, for confidential clients with service account only, search within keycloak API and reply with search result, dummy response for now.
-            msg = pureldap.LDAPSearchResultDone(
-                resultCode=ldaperrors.Success.resultCode
-            )
-            reply(msg)
+            return self.handle_LDAPSearchRequest(request, controls, reply)
         if isinstance(request, pureldap.LDAPUnbindRequest):
             msg = pureldap.LDAPBindResponse(
                 resultCode=ldaperrors.Success.resultCode
@@ -185,6 +215,152 @@ class OidcProxy(ldapserver.BaseLDAPServer):
             reply(msg)
         
         return None
+
+    def handle_LDAPSearchRequest(self, request, controls, reply):
+        """
+        Handle LDAP search requests by returning user data from cached OIDC token claims.
+        
+        This allows Keycloak (and other LDAP clients) to query user attributes
+        after a successful bind operation.
+        """
+        print(f"Search request: base={request.baseObject}, scope={request.scope}")
+        
+        # Parse the filter to extract username (uid)
+        uid = self._extract_uid_from_filter(request.filter)
+        
+        # Get cached token data for the user
+        if uid and uid in self._token_cache:
+            cache_entry = self._token_cache[uid]
+            # Check if token is still valid
+            if cache_entry['expires_at'] > datetime.now():
+                # Return search result entry with user attributes
+                entry = self._create_search_entry(request.baseObject, uid, cache_entry['claims'], request.attributes)
+                if entry:
+                    reply(entry)
+            else:
+                print(f"Token expired for user {uid}")
+                # Clean up expired entry
+                del self._token_cache[uid]
+        elif self.bound_user and self.bound_user in self._token_cache:
+            # If no uid in filter, use the bound user for this connection
+            cache_entry = self._token_cache[self.bound_user]
+            if cache_entry['expires_at'] > datetime.now():
+                entry = self._create_search_entry(request.baseObject, self.bound_user, cache_entry['claims'], request.attributes)
+                if entry:
+                    reply(entry)
+        
+        # Always send search done
+        msg = pureldap.LDAPSearchResultDone(
+            resultCode=ldaperrors.Success.resultCode
+        )
+        reply(msg)
+        return None
+    
+    def _extract_uid_from_filter(self, ldap_filter):
+        """
+        Extract uid (username) from LDAP filter.
+        Handles filters like (&(uid=test)(objectclass=inetOrgPerson))
+        """
+        if not ldap_filter:
+            return None
+        
+        # Handle AND filters
+        if hasattr(ldap_filter, 'value') and isinstance(ldap_filter.value, list):
+            for f in ldap_filter.value:
+                uid = self._extract_uid_from_filter(f)
+                if uid:
+                    return uid
+        
+        # Handle equality match (uid=value)
+        if hasattr(ldap_filter, 'attributeDesc') and hasattr(ldap_filter, 'assertionValue'):
+            attr = ldap_filter.attributeDesc.value if hasattr(ldap_filter.attributeDesc, 'value') else ldap_filter.attributeDesc
+            if attr == b'uid':
+                value = ldap_filter.assertionValue.value if hasattr(ldap_filter.assertionValue, 'value') else ldap_filter.assertionValue
+                return value.decode('utf-8') if isinstance(value, bytes) else value
+        
+        return None
+    
+    def _create_search_entry(self, base_dn, username, claims, requested_attrs):
+        """
+        Create LDAP search result entry from OIDC token claims.
+        
+        Maps OIDC claims to LDAP attributes:
+        - preferred_username/sub -> uid
+        - email -> mail
+        - name -> cn
+        - family_name -> sn
+        - given_name -> givenName
+        """
+        # Build DN for the user
+        user_dn = f"uid={username},{base_dn.decode('utf-8') if isinstance(base_dn, bytes) else base_dn}"
+        
+        # Map OIDC claims to LDAP attributes
+        attributes = []
+        
+        # objectClass - always return this
+        attributes.append((b'objectClass', [b'inetOrgPerson', b'organizationalPerson', b'person', b'top']))
+        
+        # uid
+        if b'uid' in requested_attrs or not requested_attrs:
+            attributes.append((b'uid', [username.encode('utf-8')]))
+        
+        # cn (common name)
+        if b'cn' in requested_attrs or not requested_attrs:
+            cn = claims.get('name') or claims.get('preferred_username') or username
+            attributes.append((b'cn', [cn.encode('utf-8') if isinstance(cn, str) else cn]))
+        
+        # sn (surname)
+        if b'sn' in requested_attrs or not requested_attrs:
+            sn = claims.get('family_name') or username
+            attributes.append((b'sn', [sn.encode('utf-8') if isinstance(sn, str) else sn]))
+        
+        # givenName
+        if b'givenName' in requested_attrs or not requested_attrs:
+            given_name = claims.get('given_name')
+            if given_name:
+                attributes.append((b'givenName', [given_name.encode('utf-8') if isinstance(given_name, str) else given_name]))
+        
+        # mail (email)
+        if b'mail' in requested_attrs or not requested_attrs:
+            email = claims.get('email')
+            if email:
+                attributes.append((b'mail', [email.encode('utf-8') if isinstance(email, str) else email]))
+        
+        # entryUUID - generate from username
+        if b'entryUUID' in requested_attrs or not requested_attrs:
+            # Generate a deterministic UUID from username
+            uuid_hash = hashlib.md5(username.encode('utf-8')).hexdigest()
+            uuid_formatted = f"{uuid_hash[:8]}-{uuid_hash[8:12]}-{uuid_hash[12:16]}-{uuid_hash[16:20]}-{uuid_hash[20:32]}"
+            attributes.append((b'entryUUID', [uuid_formatted.encode('utf-8')]))
+        
+        # createTimestamp and modifyTimestamp
+        if b'createTimestamp' in requested_attrs or b'modifyTimestamp' in requested_attrs or not requested_attrs:
+            # Use iat (issued at) from token if available
+            timestamp = claims.get('iat')
+            if timestamp:
+                dt = datetime.fromtimestamp(timestamp)
+                ldap_time = dt.strftime('%Y%m%d%H%M%SZ')
+                if b'createTimestamp' in requested_attrs or not requested_attrs:
+                    attributes.append((b'createTimestamp', [ldap_time.encode('utf-8')]))
+                if b'modifyTimestamp' in requested_attrs or not requested_attrs:
+                    attributes.append((b'modifyTimestamp', [ldap_time.encode('utf-8')]))
+        
+        # Filter attributes if specific ones were requested
+        if requested_attrs:
+            filtered_attrs = []
+            for attr_name, attr_values in attributes:
+                if attr_name in requested_attrs or attr_name == b'objectClass':
+                    filtered_attrs.append((attr_name, attr_values))
+            attributes = filtered_attrs
+        
+        # Create and return search result entry
+        entry = pureldap.LDAPSearchResultEntry(
+            objectName=user_dn.encode('utf-8') if isinstance(user_dn, str) else user_dn,
+            attributes=attributes
+        )
+        
+        print(f"Returning search entry for {user_dn}")
+        return entry
 
     def handle_LDAPExtendedRequest(self, request, controls, reply):
         """
