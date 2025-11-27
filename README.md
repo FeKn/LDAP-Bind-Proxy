@@ -11,8 +11,11 @@ How to spawn a simple LDAP proxy for Keycloak OIDC integration. Supports LDAP bi
 
 - **LDAP Authentication** - Translates LDAP bind requests to OIDC password grants
 - **LDAP Search** - Returns user attributes from OIDC token claims
+- **Windows AD Compatibility** - Root DSE, sAMAccountName, userPrincipalName, objectSid, memberOf
+- **Group Membership** - Maps OIDC groups/roles to LDAP group DNs
 - **TLS/SSL Support** - LDAPS, STARTTLS, and mTLS for secure connections
 - **Keycloak Integration** - Works with Keycloak LDAP federation for legacy applications
+- **Read-Only** - Secure proxy that doesn't modify the identity provider
 
 ## 🔒 TLS/SSL Support (NEW)
 
@@ -110,7 +113,30 @@ The user logs-in as usual, the legacy app sends LDAP requests as it always does,
 | iat | createTimestamp | Account creation time |
 | iat | modifyTimestamp | Last modification time |
 | (generated) | entryUUID | Unique entry identifier |
-| (static) | objectClass | inetOrgPerson, organizationalPerson, person, top |
+| (static) | objectClass | inetOrgPerson, organizationalPerson, person, top, user |
+
+### Windows Active Directory Attributes
+
+For Windows domain login compatibility, additional AD-specific attributes are provided:
+
+| OIDC Claim | LDAP Attribute | Description |
+|------------|----------------|-------------|
+| preferred_username | sAMAccountName | Windows login name |
+| email | userPrincipalName | UPN format (user@domain) |
+| groups/roles | memberOf | Group DN list |
+| (generated) | objectSid | Windows Security Identifier |
+| (static) | primaryGroupID | Primary group RID (513 = Domain Users) |
+| (static) | userAccountControl | Account control flags (512 = normal account) |
+
+### Root DSE Support
+
+The proxy responds to Root DSE queries (empty base DN) with server capabilities, essential for Windows clients to discover the directory:
+
+- `namingContexts` - Available directory partitions
+- `defaultNamingContext` - Default base DN
+- `supportedLDAPVersion` - LDAP version 3
+- `supportedSASLMechanisms` - Authentication mechanisms
+- `supportedExtension` - Extended operations (STARTTLS, WhoAmI)
 
 To ensure login security, the client must be confidential and the LDAP bind proxy must be deployed on a safe network and VM to keep its client credentials secret.
 

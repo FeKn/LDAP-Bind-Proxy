@@ -48,6 +48,10 @@ class Configuration():
     6. LDAP_PROXY_TLS_CAFILE : Path to CA bundle for client certificate verification (default None)
     7. LDAP_PROXY_REQUIRE_CLIENT_CERT : Require client certificate for mTLS (default false)
 
+    Directory Configuration:
+    1. LDAP_PROXY_BASE_DN : Base DN for directory (default dc=example,dc=org)
+    2. LDAP_PROXY_DOMAIN : Domain name for Windows compatibility (default example.org)
+
 
     """
     def __init__(self):
@@ -64,6 +68,10 @@ class Configuration():
         self.url = os.environ.get("LDAP_PROXY_TOKEN_URL")
         self.client_id = os.environ.get("LDAP_PROXY_CLIENT_ID")
         self.client_secret = os.environ.get("LDAP_PROXY_CLIENT_SECRET")
+        
+        # Directory configuration
+        self.base_dn = os.environ.get("LDAP_PROXY_BASE_DN", "dc=example,dc=org")
+        self.domain = os.environ.get("LDAP_PROXY_DOMAIN", "example.org")
 
 
 class OidcProxy(ldapserver.BaseLDAPServer):
@@ -105,6 +113,17 @@ class OidcProxy(ldapserver.BaseLDAPServer):
         print(repr(request))
         
         if isinstance(request, pureldap.LDAPBindRequest):
+            # Handle anonymous bind (empty DN and password) for Root DSE access
+            if not request.dn or request.dn == b'':
+                # Anonymous bind - always succeed
+                msg = pureldap.LDAPBindResponse(
+                    resultCode=ldaperrors.Success.resultCode,
+                    matchedDN=b'',
+                    errorMessage=b'',
+                )
+                reply(msg)
+                return None
+            
             # Get OIDC token throught password grant
             # Extract username from DN (handle both cn=xxx and uid=xxx)
             rdn = request.dn.split(b',')[0]  # Get first RDN (e.g., "cn=test" or "uid=test")
@@ -222,8 +241,17 @@ class OidcProxy(ldapserver.BaseLDAPServer):
         
         This allows Keycloak (and other LDAP clients) to query user attributes
         after a successful bind operation.
+        
+        Special handling:
+        - Root DSE (base="") - Returns server capabilities for Windows AD compatibility
+        - User searches - Returns user attributes from OIDC token claims
+        - Base DN queries - Returns domain object information
         """
         print(f"Search request: base={request.baseObject}, scope={request.scope}")
+        
+        # Handle Root DSE query (empty base DN)
+        if request.baseObject == b'' or request.baseObject == b'""':
+            return self._handle_root_dse(request, controls, reply)
         
         # Parse the filter to extract username (uid)
         uid = self._extract_uid_from_filter(request.filter)
@@ -250,6 +278,44 @@ class OidcProxy(ldapserver.BaseLDAPServer):
                     reply(entry)
         
         # Always send search done
+        msg = pureldap.LDAPSearchResultDone(
+            resultCode=ldaperrors.Success.resultCode
+        )
+        reply(msg)
+        return None
+    
+    def _handle_root_dse(self, request, controls, reply):
+        """
+        Handle Root DSE query - returns server capabilities.
+        This is critical for Windows clients to discover directory information.
+        """
+        print("Handling Root DSE query")
+        
+        base_dn_bytes = self.config.base_dn.encode('utf-8') if isinstance(self.config.base_dn, str) else self.config.base_dn
+        
+        root_dse_attrs = [
+            (b'objectClass', [b'top']),
+            (b'namingContexts', [base_dn_bytes]),
+            (b'defaultNamingContext', [base_dn_bytes]),
+            (b'supportedLDAPVersion', [b'3']),
+            (b'supportedSASLMechanisms', [b'PLAIN']),
+            (b'subschemaSubentry', [b'cn=schema']),
+            (b'vendorName', [b'LDAP-OIDC-Proxy']),
+            (b'vendorVersion', [b'1.0.0']),
+            (b'supportedExtension', [
+                b'1.3.6.1.4.1.1466.20037',  # STARTTLS
+                b'1.3.6.1.4.1.4203.1.11.3',  # WhoAmI
+            ]),
+        ]
+        
+        entry = pureldap.LDAPSearchResultEntry(
+            objectName=b'',
+            attributes=root_dse_attrs
+        )
+        
+        reply(entry)
+        
+        # Send search done
         msg = pureldap.LDAPSearchResultDone(
             resultCode=ldaperrors.Success.resultCode
         )
@@ -285,11 +351,12 @@ class OidcProxy(ldapserver.BaseLDAPServer):
         Create LDAP search result entry from OIDC token claims.
         
         Maps OIDC claims to LDAP attributes:
-        - preferred_username/sub -> uid
-        - email -> mail
+        - preferred_username/sub -> uid, sAMAccountName
+        - email -> mail, userPrincipalName
         - name -> cn
         - family_name -> sn
         - given_name -> givenName
+        - groups/roles -> memberOf
         """
         # Build DN for the user
         user_dn = f"uid={username},{base_dn.decode('utf-8') if isinstance(base_dn, bytes) else base_dn}"
@@ -297,12 +364,21 @@ class OidcProxy(ldapserver.BaseLDAPServer):
         # Map OIDC claims to LDAP attributes
         attributes = []
         
-        # objectClass - always return this
-        attributes.append((b'objectClass', [b'inetOrgPerson', b'organizationalPerson', b'person', b'top']))
+        # objectClass - always return this (include user for Windows compatibility)
+        attributes.append((b'objectClass', [b'inetOrgPerson', b'organizationalPerson', b'person', b'top', b'user']))
         
         # uid
         if b'uid' in requested_attrs or not requested_attrs:
             attributes.append((b'uid', [username.encode('utf-8')]))
+        
+        # sAMAccountName (Windows login name)
+        if b'sAMAccountName' in requested_attrs or not requested_attrs:
+            attributes.append((b'sAMAccountName', [username.encode('utf-8')]))
+        
+        # userPrincipalName (user@domain format for Windows)
+        if b'userPrincipalName' in requested_attrs or not requested_attrs:
+            upn = claims.get('email') or f"{username}@{self.config.domain}"
+            attributes.append((b'userPrincipalName', [upn.encode('utf-8') if isinstance(upn, str) else upn]))
         
         # cn (common name)
         if b'cn' in requested_attrs or not requested_attrs:
@@ -325,6 +401,25 @@ class OidcProxy(ldapserver.BaseLDAPServer):
             email = claims.get('email')
             if email:
                 attributes.append((b'mail', [email.encode('utf-8') if isinstance(email, str) else email]))
+        
+        # memberOf - group memberships from OIDC claims
+        if b'memberOf' in requested_attrs or not requested_attrs:
+            groups = self._extract_groups_from_claims(claims, base_dn)
+            if groups:
+                attributes.append((b'memberOf', groups))
+        
+        # objectSid - Windows Security Identifier (generated from username)
+        if b'objectSid' in requested_attrs or not requested_attrs:
+            sid = self._generate_sid(username)
+            attributes.append((b'objectSid', [sid]))
+        
+        # primaryGroupID - RID of primary group (Domain Users = 513)
+        if b'primaryGroupID' in requested_attrs or not requested_attrs:
+            attributes.append((b'primaryGroupID', [b'513']))
+        
+        # userAccountControl - account flags (normal account = 512)
+        if b'userAccountControl' in requested_attrs or not requested_attrs:
+            attributes.append((b'userAccountControl', [b'512']))
         
         # entryUUID - generate from username
         if b'entryUUID' in requested_attrs or not requested_attrs:
@@ -361,6 +456,52 @@ class OidcProxy(ldapserver.BaseLDAPServer):
         
         print(f"Returning search entry for {user_dn}")
         return entry
+    
+    def _extract_groups_from_claims(self, claims, base_dn):
+        """
+        Extract group memberships from OIDC token claims.
+        Maps groups/roles claims to LDAP group DNs.
+        """
+        groups = []
+        base_dn_str = base_dn.decode('utf-8') if isinstance(base_dn, bytes) else base_dn
+        
+        # Check various claim formats
+        group_claims = claims.get('groups', []) or claims.get('roles', []) or claims.get('realm_access', {}).get('roles', [])
+        
+        if isinstance(group_claims, list):
+            for group in group_claims:
+                if isinstance(group, str):
+                    # Convert group name to DN format
+                    group_dn = f"cn={group},ou=groups,{base_dn_str}"
+                    groups.append(group_dn.encode('utf-8'))
+        
+        # Always add Domain Users group for Windows compatibility
+        domain_users_dn = f"cn=Domain Users,ou=groups,{base_dn_str}"
+        groups.append(domain_users_dn.encode('utf-8'))
+        
+        return groups if groups else None
+    
+    def _generate_sid(self, username):
+        """
+        Generate a Windows-compatible SID (Security Identifier) from username.
+        Format: S-1-5-21-<domain>-<domain>-<domain>-<RID>
+        
+        This is a deterministic generation for consistency.
+        Real AD would have actual domain SIDs.
+        """
+        # Generate deterministic domain identifier parts from username hash
+        domain_hash = hashlib.md5(self.config.domain.encode('utf-8')).hexdigest()
+        domain_id_1 = int(domain_hash[0:8], 16) % 4294967295
+        domain_id_2 = int(domain_hash[8:16], 16) % 4294967295
+        domain_id_3 = int(domain_hash[16:24], 16) % 4294967295
+        
+        # Generate RID (Relative ID) from username
+        user_hash = hashlib.md5(username.encode('utf-8')).hexdigest()
+        rid = 1000 + (int(user_hash[0:8], 16) % 100000)  # RID range 1000-101000
+        
+        # Format SID string
+        sid = f"S-1-5-21-{domain_id_1}-{domain_id_2}-{domain_id_3}-{rid}"
+        return sid.encode('utf-8')
 
     def handle_LDAPExtendedRequest(self, request, controls, reply):
         """
