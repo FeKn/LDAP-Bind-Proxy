@@ -35,6 +35,11 @@ class Configuration():
     Configuration class to hold environment variable values.
     Reads configuration from environment variables on initialization.
 
+    OIDC Configuration:
+    1. LDAP_PROXY_TOKEN_URL : OIDC Token endpoint URL
+    2. LDAP_PROXY_CLIENT_ID : OIDC Client ID
+    3. LDAP_PROXY_CLIENT_SECRET : OIDC Client Secret
+
     TLS Configuration:
     1. LDAP_PROXY_TLS_CERTFILE : Path to TLS certificate file for LDAPS (default None)
     2. LDAP_PROXY_TLS_KEYFILE : Path to TLS key file for LDAPS (default None)
@@ -43,12 +48,8 @@ class Configuration():
     5. LDAP_PROXY_ENABLE_PLAIN : Enable plain LDAP when TLS is configured (default false)
     6. LDAP_PROXY_TLS_CAFILE : Path to CA bundle for client certificate verification (default None)
     7. LDAP_PROXY_REQUIRE_CLIENT_CERT : Require client certificate for mTLS (default false)
-    8. LDAP_PROXY_ENABLE_STARTTLS : Enable STARTTLS on plain LDAP port (default false)
 
-    OIDC Configuration:
-    9. LDAP_PROXY_TOKEN_URL : OIDC Token endpoint URL
-    10. LDAP_PROXY_CLIENT_ID : OIDC Client ID
-    11. LDAP_PROXY_CLIENT_SECRET : OIDC Client Secret
+
     """
     def __init__(self):
         # TLS configuration
@@ -59,7 +60,6 @@ class Configuration():
         self.plain_port = int(os.environ.get('LDAP_PROXY_PORT', '389'))
         self.enable_plain = os.environ.get('LDAP_PROXY_ENABLE_PLAIN', 'false').lower() in ('1', 'true', 'yes')
         self.require_client_cert = os.environ.get('LDAP_PROXY_REQUIRE_CLIENT_CERT', 'false').lower() in ('1', 'true', 'yes')
-        self.enable_starttls = os.environ.get('LDAP_PROXY_ENABLE_STARTTLS', 'false').lower() in ('1', 'true', 'yes')
 
         # OIDC configuration
         self.url = os.environ.get("LDAP_PROXY_TOKEN_URL")
@@ -80,6 +80,7 @@ class OidcProxy(ProxyBase):
     STARTTLS_OID = '1.3.6.1.4.1.1466.20037'
     
     def __init__(self, config, ssl_context_factory=None):
+        ProxyBase.__init__(self)  # Initialize parent class
         self.config = config
         self.ssl_context_factory = ssl_context_factory
         self.tls_started = False
@@ -284,12 +285,13 @@ if __name__ == '__main__':
     listeners_started = []
     
     # Start plain LDAP listener
-    try:
-        reactor.listenTCP(config.plain_port, factory)
-        listeners_started.append(f'Plain LDAP on port {config.plain_port}')
-        print(f'Plain LDAP listening on port {config.plain_port}')
-    except Exception as e:
-        print(f'Warning: Failed to start plain LDAP listener: {e}')
+    if config.enable_plain or not ssl_context_factory:
+        try:
+            reactor.listenTCP(config.plain_port, factory)
+            listeners_started.append(f'Plain LDAP on port {config.plain_port}')
+            print(f'Plain LDAP listening on port {config.plain_port}')
+        except Exception as e:
+            print(f'Warning: Failed to start plain LDAP listener: {e}')
 
     if config.tls_certfile and config.tls_keyfile and ssl_context_factory:
         # Start LDAPS listener (implicit TLS on port 636)
@@ -301,15 +303,6 @@ if __name__ == '__main__':
             print(f'Failed to start LDAPS: {e}')
             print(f'Exiting. Please check your TLS certificate and key file paths and port {config.tls_port} availability.')
             sys.exit(1)
-        
-        if config.enable_starttls:
-            print(f'STARTTLS enabled on port {config.plain_port}')
-    
-    elif config.enable_starttls:
-        # No TLS configured, start plain LDAP only
-        print('Warning: STARTTLS requested but TLS certificate/key not configured. Ignoring STARTTLS.')
-    
-
     
     if not listeners_started:
         print('Error: No listeners could be started. Exiting.')

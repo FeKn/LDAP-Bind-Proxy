@@ -33,7 +33,6 @@ export LDAP_PROXY_TLS_KEYFILE=./server.key
 export LDAP_PROXY_TLS_PORT=636              # LDAPS port (default: 636)
 export LDAP_PROXY_PORT=389                  # Plain LDAP port (default: 389)
 export LDAP_PROXY_ENABLE_PLAIN=false        # Enable plain LDAP when TLS is configured
-export LDAP_PROXY_ENABLE_STARTTLS=false     # Enable STARTTLS on plain port
 
 # mTLS configuration (optional)
 export LDAP_PROXY_TLS_CAFILE=./ca.crt       # CA certificate for client verification
@@ -70,7 +69,6 @@ python ldap_bind_proxy.py
 export LDAP_PROXY_TLS_CERTFILE=./server.crt
 export LDAP_PROXY_TLS_KEYFILE=./server.key
 export LDAP_PROXY_ENABLE_PLAIN=true
-export LDAP_PROXY_ENABLE_STARTTLS=true
 python ldap_bind_proxy.py
 ```
 
@@ -239,7 +237,6 @@ python -m pytest tests/test_tls_support.py --cov=ldap_bind_proxy --cov-report=ht
 | `LDAP_PROXY_PORT` | Plain LDAP port number | 389 | No |
 | `LDAP_PROXY_ENABLE_PLAIN` | Enable plain LDAP when TLS configured | false | No |
 | `LDAP_PROXY_REQUIRE_CLIENT_CERT` | Require client certificates (mTLS) | false | No |
-| `LDAP_PROXY_ENABLE_STARTTLS` | Enable STARTTLS on plain port | false | No |
 | `LDAP_PROXY_TOKEN_URL` | OIDC token endpoint URL | None | Yes |
 | `LDAP_PROXY_CLIENT_ID` | OIDC client ID | None | Yes |
 | `LDAP_PROXY_CLIENT_SECRET` | OIDC client secret | None | Yes |
@@ -313,7 +310,6 @@ export LDAP_PROXY_TLS_KEYFILE=./server.key
 
 # Enable plain LDAP and STARTTLS
 export LDAP_PROXY_ENABLE_PLAIN=true
-export LDAP_PROXY_ENABLE_STARTTLS=true
 ```
 
 ### mTLS Client Rejection
@@ -365,8 +361,6 @@ CMD ["python", "ldap_bind_proxy.py"]
 ### Docker Compose with TLS
 
 ```yaml
-version: '3.8'
-
 services:
   ldap-proxy:
     build: .
@@ -377,7 +371,6 @@ services:
       - LDAP_PROXY_TLS_CERTFILE=/app/certs/server.crt
       - LDAP_PROXY_TLS_KEYFILE=/app/certs/server.key
       - LDAP_PROXY_ENABLE_PLAIN=true
-      - LDAP_PROXY_ENABLE_STARTTLS=true
       - LDAP_PROXY_TOKEN_URL=https://keycloak:8080/realms/myrealm/protocol/openid-connect/token
       - LDAP_PROXY_CLIENT_ID=ldap-proxy
       - LDAP_PROXY_CLIENT_SECRET=secret
